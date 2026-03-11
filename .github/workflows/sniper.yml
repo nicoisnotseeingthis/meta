@@ -1,0 +1,32 @@
+name: Meta Sniper
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install httpx[http2] requests
+
+      - name: Write proxies file
+        run: echo "${{ secrets.PROXY }}" > proxies.txt
+
+      - name: Run sniper
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          META_DATR: ${{ secrets.META_DATR }}
+          META_FS: ${{ secrets.META_FS }}
+        run: python sniper.py
+        timeout-minutes: 350
