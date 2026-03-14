@@ -1,5 +1,4 @@
 import asyncio
-import httpx
 import requests
 import itertools
 import os
@@ -8,12 +7,11 @@ import time
 import json
 import re
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Config ────────────────────────────────────────────────────────────────────
 INPUT_FILE   = "username.txt"
-CONCURRENT   = 10
-DEBUG        = True
+WORKERS      = 20
 MAX_RUNTIME  = 5.5 * 60 * 60
 START_TIME   = time.time()
 
@@ -141,7 +139,7 @@ def get_fresh_tokens():
         return None, None
 
 # ── Claim ─────────────────────────────────────────────────────────────────────
-def claim_username_sync(username):
+def claim_username(username):
     fb_dtsg, lsd = get_fresh_tokens()
     if not fb_dtsg or not lsd:
         print(f"{YELLOW}  ⚠  No tokens — could not claim @{username}{RESET}", flush=True)
@@ -213,128 +211,113 @@ def send_discord_alert(username, claimed):
 # ── Cap Variants ──────────────────────────────────────────────────────────────
 def cap_variants(name: str):
     seen = set()
-    for v in [name.lower(), name.upper(), name.capitalize()]:
+    seen.add(name)
+    yield name
+    for v in {name.lower(), name.upper(), name.capitalize()}:
         if v not in seen:
             seen.add(v)
             yield v
-    if len(name) <= 8:
+    if len(name) <= 6:
         for combo in itertools.product([0, 1], repeat=len(name)):
             v = "".join(c.upper() if combo[i] else c.lower() for i, c in enumerate(name))
             if v not in seen:
                 seen.add(v)
                 yield v
 
-# ── Horizon Check (CORRECT LOGIC) ────────────────────────────────────────────
-# Meta returns:
-#   302 → location: https://horizon.meta.com/          = AVAILABLE (profile not found)
-#   302 → location: https://horizon.meta.com/profile/  = TAKEN (redirected to real profile)
-#   200                                                 = TAKEN (profile loaded directly)
-# We must NOT follow redirects — read the raw 302 location header.
-async def horizon_check(client, variant):
+# ── Single Check (stolen directly from original — proven to work) ─────────────
+def single_check(session, variant):
     url = f"https://horizon.meta.com/profile/{variant}/"
     try:
-        r = await client.get(url)
-        status = r.status_code
-        location = r.headers.get("location", "")
+        r = session.get(url, allow_redirects=False, timeout=10)
+        loc = r.headers.get("Location", "")
 
-        if DEBUG:
-            print(f"{DIM}  [DEBUG] {variant:<20} status={status} location={location!r}{RESET}", flush=True)
-
-        if status in (401, 402, 403):
-            return "UNKNOWN"
-
-        if status in (301, 302):
-            loc = location.rstrip("/").lower()
-            # Redirected to homepage = profile not found = AVAILABLE
-            if loc in ("https://horizon.meta.com", "https://www.meta.com"):
-                return "AVAILABLE"
-            # Redirected anywhere else (e.g. back to a profile) = TAKEN
+        if r.status_code == 200:
             return "TAKEN"
+        if r.status_code in (301, 302):
+            if loc == "https://horizon.meta.com/":
+                return "AVAILABLE"  # redirected to homepage = not found
+            return "TAKEN"          # redirected to a real profile
+    except Exception:
+        pass
+    return None  # inconclusive
 
-        # 200 = profile page loaded = TAKEN
-        if status == 200:
-            return "TAKEN"
+# ── Check + Claim one username ────────────────────────────────────────────────
+def check_and_claim(idx, name, total):
+    name = name.strip().lstrip("@")
+    if not name:
+        return idx, name, "SKIP"
 
-        # Anything else = treat as TAKEN to be safe
-        return "TAKEN"
+    session = requests.Session()
+    session.cookies.update(COOKIES)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36",
+    })
 
-    except httpx.TooManyRedirects:
-        return "TAKEN"
-    except Exception as e:
-        if DEBUG:
-            print(f"{DIM}  [DEBUG] {variant} exception: {e}{RESET}", flush=True)
-        return "UNKNOWN"
+    # Step 1: check exact name
+    result = single_check(session, name)
+    if result == "TAKEN":
+        return idx, name, "TAKEN"
 
-# ── Check Single Name ─────────────────────────────────────────────────────────
-async def check_single_name(semaphore, client, username, idx, total):
-    async with semaphore:
-        prefix = f"{DIM}[{idx:04}/{total:04}]{RESET} {BOLD}{CYAN}{username:<20}{RESET}"
+    if result == "AVAILABLE":
+        # Verify all cap variants too before claiming
+        for variant in cap_variants(name):
+            if variant == name:
+                continue
+            r = single_check(session, variant)
+            if r == "TAKEN":
+                return idx, name, "TAKEN"
+        # All clear — claim it
+        success = claim_username(name)
+        send_discord_alert(name, success)
+        return idx, name, "CLAIMED" if success else "AVAILABLE"
 
-        variants = list(cap_variants(username))
-        results  = await asyncio.gather(*[horizon_check(client, v) for v in variants])
+    # Inconclusive — try cap variants
+    for variant in cap_variants(name):
+        if variant == name:
+            continue
+        r = single_check(session, variant)
+        if r == "TAKEN":
+            return idx, name, "TAKEN"
 
-        if any(r == "TAKEN" for r in results):
-            print(f"{prefix}  {random.choice(TAKEN_MESSAGES)}", flush=True)
-            return
+    # Still no clear answer — claim attempt
+    success = claim_username(name)
+    send_discord_alert(name, success)
+    return idx, name, "CLAIMED" if success else "AVAILABLE"
 
-        if all(r == "UNKNOWN" for r in results):
-            print(f"{YELLOW}  ⚠  All variants inconclusive for @{username} — skipping{RESET}", flush=True)
-            return
-
-        # Double check before claiming
-        await asyncio.sleep(1)
-        recheck = await horizon_check(client, username.lower())
-        if recheck != "AVAILABLE":
-            print(f"{prefix}  {random.choice(TAKEN_MESSAGES)}", flush=True)
-            return
-
-        print(f"{prefix}  {random.choice(AVAILABLE_MESSAGES)}", flush=True)
-        available_names.append(username)
-
-        loop    = asyncio.get_event_loop()
-        success = await loop.run_in_executor(thread_pool, claim_username_sync, username)
-        await loop.run_in_executor(thread_pool, send_discord_alert, username, success)
-
-        if success:
-            claimed_names.append(username)
-            print(f"{prefix}  {random.choice(CLAIMED_MESSAGES)}", flush=True)
-
-# ── Run One Cycle ─────────────────────────────────────────────────────────────
-async def run_cycle(usernames, proxies, cycle):
+# ── Run One Pass ──────────────────────────────────────────────────────────────
+def run_pass(usernames, cycle, total_found, total_claimed):
     total = len(usernames)
     batch = usernames[:]
     random.shuffle(batch)
+    seen  = set()
 
-    semaphore = asyncio.Semaphore(CONCURRENT)
-    proxy     = random.choice(proxies) if proxies else None
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {
+            executor.submit(check_and_claim, idx, name, total): name
+            for idx, name in enumerate(batch, 1)
+            if name.lower() not in seen and not seen.add(name.lower())
+        }
+        for future in as_completed(futures):
+            idx, name, status = future.result()
+            prefix = f"{DIM}[C{cycle}][{idx:04}/{total:04}]{RESET} {BOLD}{CYAN}{name:<20}{RESET}"
 
-    client_kwargs = {
-        "follow_redirects": False,  # CRITICAL — read raw 302 location directly
-        "http2": True,
-        "cookies": COOKIES,
-        "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        "limits": httpx.Limits(
-            max_connections=100,
-            max_keepalive_connections=30,
-            keepalive_expiry=30,
-        ),
-        "timeout": 15,
-    }
-    if proxy:
-        client_kwargs["proxy"] = proxy
+            if status == "TAKEN":
+                print(f"{prefix}  {random.choice(TAKEN_MESSAGES)}", flush=True)
+            elif status == "CLAIMED":
+                print(f"{prefix}  {random.choice(CLAIMED_MESSAGES)}", flush=True)
+                claimed_names.append(name)
+                available_names.append(name)
+                total_claimed += 1
+                total_found += 1
+            elif status == "AVAILABLE":
+                print(f"{prefix}  {random.choice(AVAILABLE_MESSAGES)}", flush=True)
+                available_names.append(name)
+                total_found += 1
 
-    async with httpx.AsyncClient(**client_kwargs) as client:
-        tasks = [
-            check_single_name(semaphore, client, name, i, total)
-            for i, name in enumerate(batch, 1)
-        ]
-        await asyncio.gather(*tasks)
+    return total_found, total_claimed
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-async def main():
+def main():
     print(f"\n{CYAN}{BOLD}{'=' * 50}{RESET}")
     print(f"{PINK}{BOLD}      💻  M E L L O W 'S  U S E R  F I N D E R  💻{RESET}")
     print(f"{DIM}     24/7 mode — checks + auto-claims — loops 5.5hrs{RESET}")
@@ -349,18 +332,21 @@ async def main():
         return
     proxies = load_proxies()
 
-    print(f"{DIM}  Loaded {len(usernames)} usernames | {len(proxies)} proxies | {CONCURRENT} concurrent{RESET}\n", flush=True)
+    print(f"{DIM}  Loaded {len(usernames)} usernames | {WORKERS} workers{RESET}\n", flush=True)
 
-    cycle = 1
+    total_found   = 0
+    total_claimed = 0
+    cycle         = 1
+
     while True:
         elapsed = time.time() - START_TIME
         if elapsed > MAX_RUNTIME:
             print(f"\n{YELLOW}{BOLD}  ⏱  Approaching 6hr limit — stopping cleanly. GitHub Actions will restart.{RESET}\n")
             break
 
-        print(f"\n{CYAN}{DIM}  ── Cycle {cycle} | Elapsed: {int(elapsed // 60)}m | Available: {len(available_names)} | Claimed: {len(claimed_names)} ──{RESET}\n", flush=True)
+        print(f"\n{CYAN}{DIM}  ── Cycle {cycle} | Elapsed: {int(elapsed // 60)}m | Found: {total_found} | Claimed: {total_claimed} ──{RESET}\n", flush=True)
 
-        await run_cycle(usernames, proxies, cycle)
+        total_found, total_claimed = run_pass(usernames, cycle, total_found, total_claimed)
 
         with open("available.txt", "w") as f:
             f.write("\n".join(available_names))
@@ -369,13 +355,13 @@ async def main():
 
         cycle += 1
         print(f"\n{DIM}  Cycle done. Restarting in 5 seconds...{RESET}", flush=True)
-        await asyncio.sleep(5)
+        time.sleep(5)
 
     print(f"\n{CYAN}{BOLD}{'=' * 50}{RESET}")
-    print(f"{GREEN}{BOLD}  💎  AVAILABLE: {len(available_names)}  |  🎯  CLAIMED: {len(claimed_names)}{RESET}")
+    print(f"{GREEN}{BOLD}  💎  AVAILABLE: {total_found}  |  🎯  CLAIMED: {total_claimed}{RESET}")
     if claimed_names:
         print(f"{GREEN}  Claimed: {', '.join(claimed_names)}{RESET}")
     print(f"{CYAN}{BOLD}{'=' * 50}{RESET}\n")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
