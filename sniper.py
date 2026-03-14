@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 # ── Config ────────────────────────────────────────────────────────────────────
 INPUT_FILE   = "username.txt"
 CONCURRENT   = 10
-DEBUG        = True
+DEBUG        = True   # keep on so we can see exactly what's happening
 MAX_RUNTIME  = 5.5 * 60 * 60
 START_TIME   = time.time()
 
@@ -229,28 +229,31 @@ async def horizon_check(client, variant):
     url = f"https://horizon.meta.com/profile/{variant}/"
     try:
         r = await client.get(url)
-        final = str(r.url).rstrip("/").lower()
+        final = str(r.url).rstrip("/")
+        status = r.status_code
 
         if DEBUG:
-            print(f"{DIM}  [DEBUG] {variant:<20} status={r.status_code} final={final}{RESET}", flush=True)
+            print(f"{DIM}  [DEBUG] variant={variant!r:25} status={status} final={final!r}{RESET}", flush=True)
 
-        if r.status_code in (401, 402, 403):
-            print(f"{YELLOW}  ⚠  Auth error {r.status_code} on @{variant} — cookies may be expired{RESET}", flush=True)
+        if status in (401, 402, 403):
             return "UNKNOWN"
 
-        if f"/profile/{variant.lower()}" in final:
+        # TAKEN: final URL still contains the profile path for this username
+        if f"/profile/{variant.lower()}" in final.lower():
             return "TAKEN"
 
-        if "horizon.meta.com/profile" not in final:
+        # AVAILABLE: redirected away from profile entirely
+        if "/profile/" not in final.lower():
             return "AVAILABLE"
 
+        # Some other profile path — treat as taken to be safe
         return "TAKEN"
 
     except httpx.TooManyRedirects:
         return "TAKEN"
     except Exception as e:
         if DEBUG:
-            print(f"{DIM}  [DEBUG] {variant} exception: {e}{RESET}", flush=True)
+            print(f"{DIM}  [DEBUG] variant={variant!r} exception={e}{RESET}", flush=True)
         return "UNKNOWN"
 
 # ── Check Single Name ─────────────────────────────────────────────────────────
@@ -259,9 +262,12 @@ async def check_single_name(semaphore, client, username, idx, total):
         prefix = f"{DIM}[{idx:04}/{total:04}]{RESET} {BOLD}{CYAN}{username:<20}{RESET}"
 
         variants = list(cap_variants(username))
+        results  = await asyncio.gather(*[horizon_check(client, v) for v in variants])
 
-        # Check all variants concurrently
-        results = await asyncio.gather(*[horizon_check(client, v) for v in variants])
+        # Print a summary line showing what each variant returned
+        if DEBUG:
+            summary = dict(zip(variants[:4], results[:4]))  # show first 4 to keep logs readable
+            print(f"{DIM}  [SUMMARY] {username}: {summary}{RESET}", flush=True)
 
         if any(r == "TAKEN" for r in results):
             print(f"{prefix}  {random.choice(TAKEN_MESSAGES)}", flush=True)
@@ -271,7 +277,7 @@ async def check_single_name(semaphore, client, username, idx, total):
             print(f"{YELLOW}  ⚠  All variants inconclusive for @{username} — skipping{RESET}", flush=True)
             return
 
-        # Double check base name before claiming
+        # Double check before claiming
         await asyncio.sleep(1)
         recheck = await horizon_check(client, username.lower())
         if recheck != "AVAILABLE":
