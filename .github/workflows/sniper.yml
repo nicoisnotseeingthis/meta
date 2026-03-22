@@ -1,4 +1,4 @@
-name: Meta Sniper
+name: Meta Checker
 
 on:
   schedule:
@@ -18,15 +18,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install httpx[http2] requests
+        run: pip install requests
 
-      - name: Write proxies file
-        run: echo "${{ secrets.PROXY }}" > proxies.txt
-
-      - name: Run sniper
+      - name: Run checker
         env:
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          META_DATR: ${{ secrets.META_DATR }}
-          META_FS: ${{ secrets.META_FS }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python check.py
         timeout-minutes: 350
