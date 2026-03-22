@@ -28,5 +28,5 @@ jobs:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           META_DATR: ${{ secrets.META_DATR }}
           META_FS: ${{ secrets.META_FS }}
-        run: python sniper.py
+        run: python check.py
         timeout-minutes: 350
