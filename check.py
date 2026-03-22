@@ -1,27 +1,187 @@
-name: Meta Checker
+import requests
+import itertools
+import os
+import random
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-on:
-  schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+MAX_RUNTIME = 5.5 * 60 * 60
+START_TIME  = time.time()
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
+# ── Config ────────────────────────────────────────────────────────────────────
+INPUT_FILE      = "username.txt"
+WORKERS         = 5
+BATCH_SIZE      = 1000
+DEBUG           = False
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 
-    steps:
-      - uses: actions/checkout@v3
+# ── ANSI colours (GitHub Actions supports them) ───────────────────────────────
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+RED    = "\033[91m"
+GREEN  = "\033[92m"
+CYAN   = "\033[96m"
+PINK   = "\033[95m"
+YELLOW = "\033[93m"
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+TAKEN_MESSAGES = [
+    f"{RED}{BOLD}🔒 SNAGGED — already claimed{RESET}",
+    f"{RED}{BOLD}💀 DEAD END — someone got there first{RESET}",
+    f"{RED}{BOLD}🚫 NO LUCK — this one's taken{RESET}",
+    f"{RED}{BOLD}😤 CLAIMED — move on{RESET}",
+    f"{RED}{BOLD}🔴 LOCKED IN — not yours{RESET}",
+]
 
-      - name: Install dependencies
-        run: pip install requests
+AVAILABLE_MESSAGES = [
+    f"{GREEN}{BOLD}✅ LET'S GO — it's yours for the taking{RESET}",
+    f"{GREEN}{BOLD}💎 CLEAN — nobody has this yet{RESET}",
+    f"{GREEN}{BOLD}🟢 OPEN SEASON — grab it{RESET}",
+    f"{GREEN}{BOLD}🤑 FREE REAL ESTATE — unclaimed{RESET}",
+    f"{GREEN}{BOLD}🚀 ALL YOURS — wide open{RESET}",
+]
 
-      - name: Run checker
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: python check.py
-        timeout-minutes: 350
+
+# ── Discord ───────────────────────────────────────────────────────────────────
+
+def send_discord_alert(name: str):
+    """Fire a Discord webhook ping for an available username."""
+    if not DISCORD_WEBHOOK:
+        print(f"{YELLOW}  ⚠  DISCORD_WEBHOOK not set — skipping notification for '{name}'{RESET}", flush=True)
+        return
+    payload = {
+        "content": f"@everyone\nAvailable name: **{name}**",
+        "allowed_mentions": {"parse": ["everyone"]},
+    }
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+        if r.status_code not in (200, 204):
+            print(f"{YELLOW}  ⚠  Discord webhook returned {r.status_code} for '{name}'{RESET}", flush=True)
+    except Exception as e:
+        print(f"{YELLOW}  ⚠  Discord webhook error for '{name}': {e}{RESET}", flush=True)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def cap_variants(name: str):
+    seen = set()
+    seen.add(name)
+    yield name
+    for v in {name.lower(), name.upper(), name.capitalize()}:
+        if v not in seen:
+            seen.add(v)
+            yield v
+    if len(name) <= 6:
+        for combo in itertools.product([0, 1], repeat=len(name)):
+            v = "".join(c.upper() if combo[i] else c.lower() for i, c in enumerate(name))
+            if v not in seen:
+                seen.add(v)
+                yield v
+
+
+def single_check(session, variant):
+    """Check one exact variant with retry. Returns 'TAKEN', 'AVAILABLE', or None."""
+    url = f"https://horizon.meta.com/profile/{variant}/"
+    for attempt in range(3):
+        try:
+            r = session.get(url, allow_redirects=False, timeout=10)
+            loc = r.headers.get("Location", "")
+
+            if r.status_code == 200:
+                return "TAKEN"
+            if r.status_code in (301, 302):
+                if loc.rstrip("/") in ("https://horizon.meta.com", "https://www.meta.com"):
+                    return "AVAILABLE"
+                return "TAKEN"
+        except Exception:
+            time.sleep(1)
+    return None  # inconclusive after 3 attempts
+
+
+def check_username(idx, name, total):
+    name = name.strip().lstrip("@")
+    if not name:
+        return idx, name, "SKIP"
+
+    time.sleep(1.5)  # slow down to avoid false positives
+    session = requests.Session()
+
+    # Check ALL cap variants — any taken = name is taken
+    for variant in cap_variants(name):
+        result = single_check(session, variant)
+        if result == "TAKEN":
+            return idx, name, "TAKEN"
+
+    # Double check base name before declaring available
+    time.sleep(1)
+    recheck = single_check(session, name.lower())
+    if recheck == "TAKEN":
+        return idx, name, "TAKEN"
+
+    return idx, name, "AVAILABLE"
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def run_pass(usernames, cycle):
+    total   = len(usernames)
+    batch   = usernames[:]
+    random.shuffle(batch)
+    seen    = set()
+    results = {}
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {
+            executor.submit(check_username, idx, name, total): (idx, name)
+            for idx, name in enumerate(batch, 1)
+            if name.lower() not in seen and not seen.add(name.lower())
+        }
+        for future in as_completed(futures):
+            idx, name, status = future.result()
+            results[idx] = (name, status)
+            prefix = f"{DIM}[C{cycle}][{idx:04}/{total:04}]{RESET} {BOLD}{CYAN}{name:<20}{RESET}"
+            if status == "TAKEN":
+                print(f"{prefix}  {random.choice(TAKEN_MESSAGES)}", flush=True)
+            elif status == "AVAILABLE":
+                print(f"{prefix}  {random.choice(AVAILABLE_MESSAGES)}", flush=True)
+                send_discord_alert(name)
+
+    available = [n for _, (n, s) in sorted(results.items()) if s == "AVAILABLE"]
+    taken     = [n for _, (n, s) in sorted(results.items()) if s == "TAKEN"]
+    with open("available.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(available))
+    with open("taken.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(taken))
+    return len(available)
+
+def main():
+    print(f"\n{CYAN}{BOLD}{'=' * 50}{RESET}")
+    print(f"{PINK}{BOLD}      💻  M E L L O W 'S  U S E R  F I N D E R  💻{RESET}")
+    print(f"{DIM}        24/7 mode — loops username.txt until 5.5hrs{RESET}")
+    print(f"{CYAN}{BOLD}{'=' * 50}{RESET}\n")
+
+    if not os.path.exists(INPUT_FILE):
+        print(f"{RED}  ✖  '{INPUT_FILE}' not found!{RESET}")
+        sys.exit(1)
+
+    with open(INPUT_FILE, "r", encoding="utf-8") as f:
+        usernames = [l.strip() for l in f if l.strip()]
+
+    print(f"{DIM}  Loaded {len(usernames)} usernames{RESET}\n", flush=True)
+
+    cycle = 1
+    while True:
+        elapsed = time.time() - START_TIME
+        if elapsed > MAX_RUNTIME:
+            print(f"\n{YELLOW}{BOLD}  ⏱  Approaching 6hr limit — stopping cleanly.{RESET}\n")
+            break
+
+        print(f"\n{CYAN}{DIM}  ── Cycle {cycle} | Elapsed: {int(elapsed // 60)}m ──{RESET}\n", flush=True)
+        found = run_pass(usernames, cycle)
+        print(f"\n{DIM}  Cycle {cycle} done — {found} available found. Restarting in 5s...{RESET}", flush=True)
+        cycle += 1
+        time.sleep(5)
+
+if __name__ == "__main__":
+    main()
