@@ -42,7 +42,6 @@ arm
 army
 arrow
 art
-arts
 ash
 ask
 asset
