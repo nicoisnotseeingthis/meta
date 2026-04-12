@@ -1,3 +1,4 @@
+4:37 PM
 ace
 act
 add
@@ -201,7 +202,6 @@ ken
 key
 kid
 kit
-kkk
 koi
 ksc
 lab
@@ -1771,7 +1771,6 @@ acquire
 address
 advance
 against
-airdrop
 already
 analyst
 ancient
@@ -1782,7 +1781,6 @@ anytime
 arrived
 article
 assault
-attempt
 average
 balance
 battery
@@ -1815,7 +1813,6 @@ company
 compare
 compete
 complex
-concept
 concern
 conduct
 confirm
@@ -1854,7 +1851,6 @@ emperor
 endless
 enhance
 episode
-essence
 evening
 exactly
 example
@@ -1951,21 +1947,18 @@ privacy
 private
 problem
 process
-produce
 profile
 program
 project
 promise
 protect
 protest
-provide
 purpose
 pyramid
 quality
 quarter
 radical
 railway
-reaction
 reality
 receive
 recover
@@ -2093,7 +2086,6 @@ constant
 consumer
 continue
 contract
-convince
 corridor
 coverage
 creative
@@ -2110,7 +2102,6 @@ designer
 detailed
 diameter
 director
-disabled
 disaster
 disorder
 division
@@ -2120,7 +2111,6 @@ education
 election
 electric
 elevator
-emerging
 emphasis
 employee
 encourage
@@ -2128,7 +2118,6 @@ engineer
 entirely
 entrance
 evaluate
-everyday
 evidence
 exchange
 exercise
@@ -2136,7 +2125,6 @@ existing
 explicit
 exposure
 facility
-feedback
 festival
 financial
 flexible
@@ -2153,7 +2141,6 @@ incident
 increase
 industry
 inflation
-informed
 instance
 intended
 interact
@@ -2190,7 +2177,6 @@ observer
 official
 operator
 original
-overcome
 painting
 parallel
 passenger
@@ -2217,7 +2203,6 @@ protocol
 provider
 purchase
 question
-reaction
 recovery
 register
 relation
