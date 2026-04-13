@@ -2043,7 +2043,6 @@ random
 unknown
 mystery
 enigma
-anomaly
 glitch
 error
 void
